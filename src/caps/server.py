@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from caps.agent import IntentInterpreter
-from caps.schema import PaymentIntent, SchemaValidator
+from caps.schema import PaymentIntent, SchemaValidator, IntentType
 from caps.context.context_service import ContextService
 from caps.policy import PolicyEngine
 from caps.execution import DecisionRouter, ExecutionEngine
@@ -165,6 +165,48 @@ async def process_command(req: CommandRequest):
         amount=intent.amount,
         merchant_vpa=intent.merchant_vpa
     )
+
+    # HANDLE NON-PAYMENT INTENTS
+    if intent.intent_type == IntentType.BALANCE_INQUIRY:
+        user_ctx = caps.context_service.get_user_context(req.user_id)
+        if not user_ctx:
+             # Create default context if missing
+            from caps.context.mock_data import get_default_user
+            user_ctx = get_default_user()
+            
+        return CommandResponse(
+            status="processed",
+            message="Balance Inquiry",
+            intent=intent.model_dump(),
+            policy_decision="APPROVE",
+            execution_result={
+                "balance": user_ctx.wallet_balance,
+                "daily_spend": user_ctx.daily_spend_today,
+                "currency": "INR"
+            }
+        )
+
+    if intent.intent_type == IntentType.TRANSACTION_HISTORY:
+        history = caps.execution_engine.get_transaction_history(req.user_id)
+        history_data = [
+            {
+                "transaction_id": txn.transaction_id,
+                "amount": txn.amount,
+                "merchant_vpa": txn.merchant_vpa,
+                "state": txn.state.value,
+                "timestamp": txn.created_at.isoformat() if txn.created_at else None
+            }
+            for txn in history
+        ]
+        return CommandResponse(
+            status="processed",
+            message="Transaction History",
+            intent=intent.model_dump(),
+            policy_decision="APPROVE",
+            execution_result={
+                "history": history_data
+            }
+        )
 
     # 3. Context Retrieval (Direct sync call)
     user_ctx = caps.context_service.get_user_context(req.user_id)

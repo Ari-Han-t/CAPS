@@ -91,6 +91,73 @@ function App() {
                                         </div>
                                     )}
 
+                                    {/* Balance Inquiry Card */}
+                                    {item.data.intent?.intent_type === 'BALANCE_INQUIRY' && item.data.execution_result && (
+                                        <div className="bg-slate-900/50 p-4 rounded-lg border border-slate-700/50 mt-2">
+                                            <div className="flex justify-between items-center mb-2">
+                                                <span className="text-xs text-slate-400">Wallet Balance</span>
+                                                <div className="flex items-center gap-2">
+                                                    <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+                                                    <span className="text-xs text-green-400 font-medium">Live</span>
+                                                </div>
+                                            </div>
+                                            <div className="text-3xl font-bold mb-4">
+                                                ₹{item.data.execution_result.balance?.toFixed(2)}
+                                            </div>
+
+                                            <div className="bg-slate-800/50 rounded p-2">
+                                                <div className="flex justify-between text-xs mb-1">
+                                                    <span className="text-slate-400">Daily Spend</span>
+                                                    <span className="text-slate-200">₹{item.data.execution_result.daily_spend?.toFixed(2)} / ₹2000</span>
+                                                </div>
+                                                <div className="w-full bg-slate-700 h-1.5 rounded-full overflow-hidden">
+                                                    <div
+                                                        className="bg-blue-500 h-full rounded-full"
+                                                        style={{ width: `${Math.min((item.data.execution_result.daily_spend || 0) / 2000 * 100, 100)}%` }}
+                                                    ></div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* Transaction History Card */}
+                                    {item.data.intent?.intent_type === 'TRANSACTION_HISTORY' && item.data.execution_result?.history && (
+                                        <div className="bg-slate-900/50 rounded-lg border border-slate-700/50 mt-2 overflow-hidden">
+                                            <div className="bg-slate-800/50 px-3 py-2 border-b border-slate-700/50 flex justify-between items-center">
+                                                <span className="text-xs font-medium text-slate-300">Recent Transactions</span>
+                                                <Clock className="w-3 h-3 text-slate-500" />
+                                            </div>
+                                            <div className="max-h-48 overflow-y-auto divide-y divide-slate-800/50">
+                                                {item.data.execution_result.history.length === 0 ? (
+                                                    <div className="p-4 text-center text-xs text-slate-500">No recent transactions</div>
+                                                ) : (
+                                                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                                                    item.data.execution_result.history.map((txn: any, idx: number) => (
+                                                        <div key={idx} className="p-3 hover:bg-slate-800/30 transition-colors">
+                                                            <div className="flex justify-between items-start mb-1">
+                                                                <span className="text-sm font-medium text-slate-200">{txn.merchant_vpa}</span>
+                                                                <span className={`text-sm font-bold ${txn.state === 'completed' ? 'text-white' : 'text-slate-400'}`}>
+                                                                    -₹{txn.amount}
+                                                                </span>
+                                                            </div>
+                                                            <div className="flex justify-between items-center">
+                                                                <span className="text-xs text-slate-500">
+                                                                    {txn.timestamp ? new Date(txn.timestamp).toLocaleDateString() : 'Unknown date'}
+                                                                </span>
+                                                                <span className={`text-xs px-1.5 py-0.5 rounded ${txn.state === 'completed' ? 'bg-green-900/30 text-green-400' :
+                                                                        txn.state === 'executed' ? 'bg-green-900/30 text-green-400' :
+                                                                            'bg-red-900/30 text-red-400'
+                                                                    }`}>
+                                                                    {txn.state}
+                                                                </span>
+                                                            </div>
+                                                        </div>
+                                                    ))
+                                                )}
+                                            </div>
+                                        </div>
+                                    )}
+
                                     {/* Execution Result Card */}
                                     {item.data.status === 'executed' && item.data.execution_result && (
                                         <div className="bg-green-900/30 p-3 rounded-lg border border-green-700/50 mt-2">
