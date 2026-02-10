@@ -5,11 +5,11 @@ Exposes the CAPS payment processing logic via REST API for frontend integration.
 
 import logging
 from datetime import datetime, timedelta, UTC
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 # Load environment variables (API keys)
@@ -23,6 +23,7 @@ from caps.execution import DecisionRouter, ExecutionEngine
 from caps.memory import SessionMemory
 from caps.ledger import AuditLedger
 from caps.intelligence import FraudIntelligence
+from caps.intelligence.models import ReportType, MerchantBadge, MerchantRiskState, get_badge_emoji
 
 # Configure Logging
 logging.basicConfig(level=logging.INFO)
@@ -34,6 +35,10 @@ app = FastAPI(title="CAPS API", version="0.7.0")
 # CORS middleware
 origins = [
     "http://localhost:5173",  # Vite dev server
+    "http://localhost:5174",
+    "http://localhost:5175",
+    "http://localhost:5176",
+    "http://localhost:5177",
     "http://127.0.0.1:5173",
 ]
 
@@ -61,6 +66,14 @@ class CommandResponse(BaseModel):
     risk_info: Optional[Dict[str, Any]] = None
     context_used: Optional[Dict[str, Any]] = None
     user_state: Optional[Dict[str, Any]] = None
+    fraud_intel: Optional[Dict[str, Any]] = None
+
+
+class ReportRequest(BaseModel):
+    merchant_vpa: str
+    report_type: str = Field(description="SCAM, SUSPICIOUS, or LEGITIMATE")
+    reason: Optional[str] = None
+    user_id: str = "user_default"
 
 
 # Initialize CAPS Components (Singletons)
@@ -84,6 +97,59 @@ class CAPSContainer:
 caps = CAPSContainer()
 
 
+# ── Seed Demo Fraud Intelligence Data ──────────────────────────────────
+def seed_fraud_data():
+    """Populate FraudIntelligence with realistic demo merchants."""
+    fi = caps.fraud_intelligence
+    demo_merchants = [
+        # Confirmed scammers
+        ("fakeshop99@upi", "SCAM", "Fake electronics store, never delivers products"),
+        ("fakeshop99@upi", "SCAM", "Charged me but no delivery"),
+        ("fakeshop99@upi", "SCAM", "Fraudulent seller"),
+        ("lotterywin@upi", "SCAM", "Lottery scam - asked for advance fee"),
+        ("lotterywin@upi", "SCAM", "Fake lottery prize claim"),
+        ("lotterywin@upi", "SUSPICIOUS", "Received unsolicited payment request"),
+        ("quickloan247@upi", "SCAM", "Fake loan app - stole personal data"),
+        ("quickloan247@upi", "SCAM", "Charged processing fee, no loan disbursed"),
+        # Cautionary merchants
+        ("discountbazaar@upi", "SUSPICIOUS", "Product quality is very poor"),
+        ("discountbazaar@upi", "LEGITIMATE", "Received order but took 2 weeks"),
+        ("discountbazaar@upi", "SCAM", "Wrong item delivered, no refund"),
+        ("cryptotrader@upi", "SUSPICIOUS", "Promises guaranteed returns"),
+        ("cryptotrader@upi", "SCAM", "Lost money on fake crypto scheme"),
+        ("cryptotrader@upi", "LEGITIMATE", "Small trade went fine"),
+        # Safe merchants
+        ("amazon@upi", "LEGITIMATE", "Fast delivery, genuine products"),
+        ("amazon@upi", "LEGITIMATE", "Great service"),
+        ("amazon@upi", "VERIFIED", "Verified by admin"),
+        ("swiggy@upi", "LEGITIMATE", "Food delivery on time"),
+        ("swiggy@upi", "LEGITIMATE", "Good service"),
+        ("flipkart@upi", "LEGITIMATE", "Genuine products, easy returns"),
+        ("flipkart@upi", "LEGITIMATE", "Trusted platform"),
+        ("flipkart@upi", "LEGITIMATE", "Always reliable"),
+        ("zomato@upi", "LEGITIMATE", "Great food delivery"),
+        ("zomato@upi", "LEGITIMATE", "On-time every time"),
+    ]
+    for vpa, rtype, reason in demo_merchants:
+        fi.report_merchant(
+            merchant_vpa=vpa,
+            reporter_id=f"user_{hash(vpa + reason) % 1000:03d}",
+            report_type=ReportType(rtype),
+            reason=reason,
+        )
+    # Mark confirmed scammers via admin
+    fi.verify_merchant_as_scam("fakeshop99@upi", "admin")
+    fi.verify_merchant_as_scam("lotterywin@upi", "admin")
+    fi.verify_merchant_as_scam("quickloan247@upi", "admin")
+    fi.verify_merchant_as_scam("discountbazaar@upi", "admin")
+    # Mark safe merchants
+    fi.verify_merchant_as_safe("amazon@upi", "admin")
+    fi.verify_merchant_as_safe("flipkart@upi", "admin")
+    logger.info("Fraud Intelligence seeded with demo data")
+
+seed_fraud_data()
+
+
 # Routes
 @app.get("/")
 async def root():
@@ -95,6 +161,32 @@ async def get_context(user_id: str):
     """Debug endpoint to see user context"""
     ctx = caps.context_service.get_user_context(user_id)
     return ctx.model_dump() if ctx else {"error": "User not found"}
+
+
+@app.get("/user-state/{user_id}")
+async def get_user_state_endpoint(user_id: str):
+    """Get current user state (balance, spend, transactions) for frontend display."""
+    u_ctx = caps.context_service.get_user_context(user_id)
+    if not u_ctx:
+        from caps.context.mock_data import get_default_user
+        u_ctx = get_default_user()
+        u_ctx.user_id = user_id
+    
+    recent_txns = caps.execution_engine.get_transaction_history(user_id)
+    return {
+        "balance": u_ctx.wallet_balance,
+        "daily_spend": u_ctx.daily_spend_today,
+        "daily_limit": 2000.0,
+        "trust_score": u_ctx.trust_score,
+        "recent_transactions": [
+            {
+                "merchant": t.merchant_vpa,
+                "amount": t.amount,
+                "status": t.state.value,
+                "timestamp": t.created_at.isoformat() if t.created_at else None
+            } for t in recent_txns[:10]
+        ]
+    }
 
 
 @app.post("/process-command", response_model=CommandResponse)
@@ -256,8 +348,37 @@ async def process_command(req: CommandRequest):
 
     # We need to fetch merchant context if it's a payment
     merchant_ctx = None
+    merchant_intel = None
+    fraud_intel_dict = None
     if intent.merchant_vpa:
         merchant_ctx = caps.context_service.get_merchant_context(intent.merchant_vpa)
+        
+        # 3.5 Fraud Intelligence Check
+        merchant_intel = caps.fraud_intelligence.get_merchant_score(intent.merchant_vpa)
+        fraud_intel_dict = {
+            "merchant_vpa": merchant_intel.merchant_vpa,
+            "badge": merchant_intel.badge.value,
+            "badge_emoji": get_badge_emoji(merchant_intel.badge),
+            "community_score": merchant_intel.community_score,
+            "scam_rate": round(merchant_intel.scam_rate * 100, 1),
+            "total_reports": merchant_intel.total_reports,
+            "scam_reports": merchant_intel.scam_reports,
+            "risk_state": merchant_intel.risk_state.value,
+        }
+        
+        # HARD BLOCK: Deny payment to scam/blocked merchants
+        blocked_badges = {MerchantBadge.CONFIRMED_SCAM, MerchantBadge.LIKELY_SCAM}
+        if merchant_intel.badge in blocked_badges or merchant_intel.risk_state == MerchantRiskState.BLOCKED:
+            logger.warning(f"BLOCKED payment to {intent.merchant_vpa}: badge={merchant_intel.badge.value}, risk={merchant_intel.risk_state.value}")
+            return CommandResponse(
+                status="blocked",
+                message=f"Payment BLOCKED: {intent.merchant_vpa} is flagged as {merchant_intel.badge.value} by the community. This merchant has a {fraud_intel_dict['scam_rate']}% scam rate across {merchant_intel.total_reports} reports.",
+                intent=intent.model_dump(),
+                policy_decision="DENY",
+                fraud_intel=fraud_intel_dict,
+                context_used=resolved if resolved else None,
+                user_state=get_user_state(req.user_id)
+            )
 
     # 4. Policy Evaluation
     policy_result = caps.policy_engine.evaluate(intent, user_ctx, merchant_ctx)
@@ -320,9 +441,138 @@ async def process_command(req: CommandRequest):
             "passed_rules": policy_result.passed_rules,
             "reason": policy_result.reason
         },
+        fraud_intel=fraud_intel_dict,
         context_used=resolved if resolved else None,
         user_state=get_user_state(req.user_id)
     )
+
+
+# ── Fraud Intelligence Endpoints ───────────────────────────────────────
+@app.get("/fraud/scammers")
+async def get_scammers(limit: int = 20):
+    """Get top scam-rated merchants with badges."""
+    scammers = caps.fraud_intelligence.get_scam_merchants(limit=limit)
+    # Also include cautionary merchants for a fuller picture
+    conn = caps.fraud_intelligence._get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT * FROM scores ORDER BY scam_rate DESC LIMIT ?",
+        (limit,)
+    )
+    rows = cursor.fetchall()
+    caps.fraud_intelligence._close_connection(conn)
+    all_merchants = [caps.fraud_intelligence._row_to_score(row) for row in rows]
+    
+    return [
+        {
+            "merchant_vpa": m.merchant_vpa,
+            "community_score": round(m.community_score, 2),
+            "scam_rate": round(m.scam_rate * 100, 1),
+            "badge": m.badge.value,
+            "badge_emoji": get_badge_emoji(m.badge),
+            "risk_state": m.risk_state.value,
+            "total_reports": m.total_reports,
+            "scam_reports": m.scam_reports,
+            "legitimate_reports": m.legitimate_reports,
+            "last_updated": m.last_updated.isoformat() if m.last_updated else None,
+        }
+        for m in all_merchants
+    ]
+
+
+@app.get("/fraud/merchant/{vpa}")
+async def get_merchant_fraud_info(vpa: str):
+    """Get detailed fraud score and recent reports for a merchant."""
+    score = caps.fraud_intelligence.get_merchant_score(vpa)
+    reports = caps.fraud_intelligence.get_reports_for_merchant(vpa, limit=10)
+    
+    return {
+        "score": {
+            "merchant_vpa": score.merchant_vpa,
+            "community_score": round(score.community_score, 2),
+            "scam_rate": round(score.scam_rate * 100, 1),
+            "badge": score.badge.value,
+            "badge_emoji": get_badge_emoji(score.badge),
+            "risk_state": score.risk_state.value,
+            "total_reports": score.total_reports,
+            "scam_reports": score.scam_reports,
+            "suspicious_reports": score.suspicious_reports,
+            "legitimate_reports": score.legitimate_reports,
+        },
+        "reports": [
+            {
+                "report_id": r.report_id,
+                "report_type": r.report_type.value,
+                "reason": r.reason,
+                "reporter_id": r.reporter_id,
+                "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+                "verified": r.verified,
+            }
+            for r in reports
+        ]
+    }
+
+
+@app.post("/fraud/report")
+async def submit_fraud_report(req: ReportRequest):
+    """Submit a crowdsourced fraud report about a merchant."""
+    try:
+        report_type = ReportType(req.report_type)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid report type: {req.report_type}. Use SCAM, SUSPICIOUS, or LEGITIMATE."
+        )
+    
+    report = caps.fraud_intelligence.report_merchant(
+        merchant_vpa=req.merchant_vpa,
+        reporter_id=req.user_id,
+        report_type=report_type,
+        reason=req.reason,
+    )
+    
+    # Get updated score after report
+    updated_score = caps.fraud_intelligence.get_merchant_score(req.merchant_vpa)
+    
+    return {
+        "status": "reported",
+        "report_id": report.report_id,
+        "updated_badge": updated_score.badge.value,
+        "updated_badge_emoji": get_badge_emoji(updated_score.badge),
+        "updated_score": round(updated_score.community_score, 2),
+    }
+
+
+@app.get("/fraud/stats")
+async def get_fraud_stats():
+    """Get summary fraud intelligence statistics."""
+    conn = caps.fraud_intelligence._get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT COUNT(*) FROM reports")
+    total_reports = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(DISTINCT merchant_vpa) FROM scores")
+    total_merchants = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM scores WHERE badge IN ('LIKELY_SCAM', 'CONFIRMED_SCAM')")
+    flagged_merchants = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM scores WHERE badge IN ('VERIFIED_SAFE', 'LIKELY_SAFE')")
+    safe_merchants = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM reports WHERE report_type = 'SCAM'")
+    scam_reports = cursor.fetchone()[0]
+    
+    caps.fraud_intelligence._close_connection(conn)
+    
+    return {
+        "total_reports": total_reports,
+        "total_merchants": total_merchants,
+        "flagged_merchants": flagged_merchants,
+        "safe_merchants": safe_merchants,
+        "scam_reports": scam_reports,
+    }
 
 
 if __name__ == "__main__":
