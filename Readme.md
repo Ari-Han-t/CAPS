@@ -15,6 +15,9 @@
 
 ## Table of Contents
 
+- [Prerequisites](#-prerequisites)
+- [Installation & Setup](#-installation--setup)
+- [Running the Application](#-running-the-application)
 - [Project Overview](#-project-overview)
 - [Core Philosophy](#-core-philosophy)
 - [System Architecture](#-system-architecture)
@@ -24,6 +27,338 @@
 - [Policy & Risk Engine](#-policy--risk-engine)
 - [Implementation Roadmap](#-implementation-roadmap)
 - [Technology Stack](#-technology-stack)
+
+---
+
+## 📋 Prerequisites
+
+Before you begin, ensure you have the following installed on your system:
+
+| Requirement | Version | Purpose |
+|-------------|---------|---------|
+| **Python** | 3.10 or higher | Backend server & CAPS engine |
+| **Node.js** | 18+ (LTS recommended) | Frontend build tooling |
+| **npm** | 9+ (comes with Node.js) | Frontend package management |
+| **Ollama** | Latest | Local LLM for intent interpretation |
+| **Git** | Latest | Cloning the repository |
+
+### Installing Prerequisites
+
+<details>
+<summary><strong>🐧 Linux (Ubuntu/Debian)</strong></summary>
+
+```bash
+# Python 3.10+
+sudo apt update
+sudo apt install python3 python3-pip python3-venv -y
+
+# Node.js 18+ (via NodeSource)
+curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+sudo apt install nodejs -y
+
+# Ollama
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Git
+sudo apt install git -y
+```
+
+</details>
+
+<details>
+<summary><strong>🍎 macOS</strong></summary>
+
+```bash
+# Install Homebrew (if not already installed)
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+# Python 3.10+
+brew install python@3.12
+
+# Node.js 18+
+brew install node
+
+# Ollama
+brew install ollama
+
+# Git (usually pre-installed on macOS)
+brew install git
+```
+
+</details>
+
+<details>
+<summary><strong>🪟 Windows</strong></summary>
+
+1. **Python 3.10+** — Download from [python.org](https://www.python.org/downloads/). During installation, **check "Add Python to PATH"**.
+
+2. **Node.js 18+** — Download the LTS installer from [nodejs.org](https://nodejs.org/).
+
+3. **Ollama** — Download from [ollama.com/download](https://ollama.com/download) and run the installer.
+
+4. **Git** — Download from [git-scm.com](https://git-scm.com/download/win). During installation, select **"Git from the command line and also from 3rd-party software"**.
+
+> [!TIP]
+> On Windows, use **PowerShell** or **Git Bash** for running the commands below. All `python3` references should be replaced with `python` on Windows.
+
+</details>
+
+### Pull the LLM Model
+
+After installing Ollama, pull the required model:
+
+```bash
+# Start Ollama service (if not running)
+ollama serve &
+
+# Pull the CodeLlama model used for intent interpretation
+ollama pull codellama:7b
+```
+
+> [!NOTE]
+> The first pull will download ~3.8 GB. You can substitute a different model by modifying the LLM configuration in the server, but `codellama:7b` is the tested default.
+
+---
+
+## 🛠️ Installation & Setup
+
+### 1. Clone the Repository
+
+```bash
+git clone https://github.com/Atharva-Mendhulkar/CAPS.git
+cd CAPS
+```
+
+### 2. Backend Setup (Python)
+
+<details>
+<summary><strong>🐧 Linux / 🍎 macOS</strong></summary>
+
+```bash
+# Create a virtual environment
+python3 -m venv venv
+
+# Activate the virtual environment
+source venv/bin/activate
+
+# Install the project and all dependencies
+pip install -e ".[dev]"
+```
+
+</details>
+
+<details>
+<summary><strong>🪟 Windows (PowerShell)</strong></summary>
+
+```powershell
+# Create a virtual environment
+python -m venv venv
+
+# Activate the virtual environment
+.\venv\Scripts\Activate.ps1
+
+# If you get an execution policy error, run this first:
+# Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+
+# Install the project and all dependencies
+pip install -e ".[dev]"
+```
+
+</details>
+
+<details>
+<summary><strong>🪟 Windows (Command Prompt)</strong></summary>
+
+```cmd
+:: Create a virtual environment
+python -m venv venv
+
+:: Activate the virtual environment
+venv\Scripts\activate.bat
+
+:: Install the project and all dependencies
+pip install -e ".[dev]"
+```
+
+</details>
+
+### 3. Frontend Setup (Node.js)
+
+```bash
+# Navigate to the frontend directory
+cd frontend
+
+# Install dependencies
+npm install
+
+# Return to the project root
+cd ..
+```
+
+### 4. Environment Configuration
+
+Create a `.env` file in the project root:
+
+<details>
+<summary><strong>🐧 Linux / 🍎 macOS</strong></summary>
+
+```bash
+cat > .env << 'EOF'
+# Gemini API Configuration (optional - for cloud LLM mode)
+GOOGLE_API_KEY=your_google_api_key_here
+
+# Agent Configuration
+GEMINI_MODEL=gemini-pro
+AGENT_TEMPERATURE=0.1
+AGENT_MAX_TOKENS=1024
+
+# UPI Lite Constraints (Default Values)
+MAX_TRANSACTION_AMOUNT=500
+MAX_DAILY_SPEND=2000
+MAX_TRANSACTIONS_PER_5MIN=10
+
+# Logging
+LOG_LEVEL=INFO
+EOF
+```
+
+</details>
+
+<details>
+<summary><strong>🪟 Windows (PowerShell)</strong></summary>
+
+```powershell
+@"
+# Gemini API Configuration (optional - for cloud LLM mode)
+GOOGLE_API_KEY=your_google_api_key_here
+
+# Agent Configuration
+GEMINI_MODEL=gemini-pro
+AGENT_TEMPERATURE=0.1
+AGENT_MAX_TOKENS=1024
+
+# UPI Lite Constraints (Default Values)
+MAX_TRANSACTION_AMOUNT=500
+MAX_DAILY_SPEND=2000
+MAX_TRANSACTIONS_PER_5MIN=10
+
+# Logging
+LOG_LEVEL=INFO
+"@ | Out-File -FilePath .env -Encoding UTF8
+```
+
+</details>
+
+> [!IMPORTANT]
+> The `GOOGLE_API_KEY` is only needed if you want to use Google's cloud Gemini models. By default, CAPS uses a **local Ollama model** (`codellama:7b`), which requires no API key.
+
+---
+
+## 🚀 Running the Application
+
+### Quick Start (Linux / macOS)
+
+Use the included startup script to launch both backend and frontend:
+
+```bash
+# Make the script executable (first time only)
+chmod +x scripts/start_server.sh
+
+# Start everything
+./scripts/start_server.sh
+```
+
+This will start:
+- **Backend** on `http://localhost:8000`
+- **Frontend** on `http://localhost:5175`
+
+### Manual Start (All Platforms)
+
+If the startup script doesn't work for your platform, start each component separately:
+
+#### Terminal 1 — Backend Server
+
+<details>
+<summary><strong>🐧 Linux / 🍎 macOS</strong></summary>
+
+```bash
+# Activate the virtual environment
+source venv/bin/activate
+
+# Set Python path and start the server
+export PYTHONPATH=$PYTHONPATH:$(pwd)/src
+python3 -m caps.server
+```
+
+</details>
+
+<details>
+<summary><strong>🪟 Windows (PowerShell)</strong></summary>
+
+```powershell
+# Activate the virtual environment
+.\venv\Scripts\Activate.ps1
+
+# Set Python path and start the server
+$env:PYTHONPATH = "$env:PYTHONPATH;$(Get-Location)\src"
+python -m caps.server
+```
+
+</details>
+
+<details>
+<summary><strong>🪟 Windows (Command Prompt)</strong></summary>
+
+```cmd
+:: Activate the virtual environment
+venv\Scripts\activate.bat
+
+:: Set Python path and start the server
+set PYTHONPATH=%PYTHONPATH%;%cd%\src
+python -m caps.server
+```
+
+</details>
+
+You should see output like:
+```
+INFO:     CAPS Components Initialized
+INFO:     Fraud Intelligence seeded with demo data
+INFO:     Uvicorn running on http://0.0.0.0:8000
+```
+
+#### Terminal 2 — Frontend Dev Server
+
+```bash
+cd frontend
+npm run dev
+```
+
+You should see:
+```
+  VITE v6.x.x  ready in XXX ms
+
+  ➜  Local:   http://localhost:5175/
+```
+
+### Verify Everything Works
+
+1. Open your browser and navigate to **http://localhost:5175**
+2. You should see the CAPS interface with a voice orb and text input
+3. Try typing: `pay 100 to amazon@upi` to test a payment flow
+4. Try typing: `pay 200 to fakeshop99@upi` to see fraud blocking in action
+
+### Running Tests
+
+```bash
+# Activate the virtual environment first, then:
+pytest
+```
+
+With coverage report:
+```bash
+pytest --cov=caps --cov-report=term-missing
+```
 
 ---
 
