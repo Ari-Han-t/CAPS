@@ -1,12 +1,16 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { FileText, Mic, User, UserX } from "lucide-react";
+import { FileText, Mic, User, UserX, Shield, Send, MessageSquare, Wallet } from "lucide-react";
 import { VoiceOrb } from "./components/VoiceOrb";
 import { AIProcessCloud } from "./components/AIProcessCloud";
 import { DecisionButtons } from "./components/DecisionButtons";
 import { LogsPanel } from "./components/LogsPanel";
 import { LogEntry } from "./components/LogCard";
 import { DelayedPaymentTimer } from "./components/DelayedPaymentTimer";
+import { useVoiceInput } from "../hooks/useVoiceInput";
+import { processCommand, CommandResponse, getUserState, UserState, executeApproved } from "../api/client";
+import { ScammerPanel } from "./components/ScammerPanel";
+import { TransactionHistoryPanel } from "./components/TransactionHistoryPanel";
 
 type AppState =
   | "idle"
@@ -19,366 +23,401 @@ type AppState =
   | "awaiting"
   | "executing"
   | "completed"
-  | "blocked";
-
-type RiskLevel = "low" | "medium" | "high";
+  | "blocked"
+  | "error";
 
 interface DelayedPayment {
   id: string;
   amount: string;
   recipient: string;
   delayedUntil: Date;
-  scenario: any;
+  intent: any; // Store the intent for delayed execution
 }
-
-// Mock scenarios for demo
-const mockScenarios = [
-  {
-    command: "Send $50 to Sarah for dinner",
-    amount: "$50.00",
-    recipient: "Sarah Johnson",
-    description: "Dinner split",
-    riskLevel: "low" as RiskLevel,
-    steps: [
-      "Interpreting payment request…",
-      "Extracting amount: $50.00",
-      "Identifying recipient: Sarah Johnson",
-      "Checking location safety: Home (safe zone)",
-      "Evaluating spending rules: Within daily limit",
-      "Risk score: Low",
-      "Auto-approving low-risk transaction…",
-    ],
-    context: [
-      "Location: Home",
-      "Time: Evening",
-      "Recent transaction: None in last 24h to this recipient",
-    ],
-    policyChecks: [
-      "Amount below $100 threshold",
-      "Recipient is verified contact",
-      "Transaction frequency normal",
-      "Device is authenticated",
-    ],
-    confidence: 94,
-  },
-  {
-    command: "Transfer $500 to Unknown Account",
-    amount: "$500.00",
-    recipient: "Unknown Account",
-    description: "Large transfer to new recipient",
-    riskLevel: "high" as RiskLevel,
-    steps: [
-      "Interpreting payment request…",
-      "Extracting amount: $500.00",
-      "Identifying recipient: Unknown Account",
-      "⚠️ Warning: New recipient detected",
-      "⚠️ Warning: Large amount detected",
-      "Risk score: High",
-      "Decision requires user approval…",
-    ],
-    context: [
-      "Location: Unknown",
-      "Time: Late night",
-      "Recent transaction: First time to this recipient",
-    ],
-    policyChecks: [
-      "⚠️ Amount above $100 threshold",
-      "⚠️ Recipient not in contacts",
-      "⚠️ Unusual transaction time",
-      "Device is authenticated",
-    ],
-    confidence: 62,
-  },
-  {
-    command: "Pay $15 to Coffee Shop",
-    amount: "$15.00",
-    recipient: "Brew & Co.",
-    description: "Coffee purchase",
-    riskLevel: "low" as RiskLevel,
-    steps: [
-      "Interpreting payment request…",
-      "Extracting amount: $15.00",
-      "Identifying recipient: Brew & Co.",
-      "Checking location safety: Coffee shop (public)",
-      "Evaluating spending rules: Routine expense",
-      "Risk score: Very Low",
-      "Auto-approving low-risk transaction…",
-    ],
-    context: [
-      "Location: Downtown",
-      "Time: Morning",
-      "Frequent merchant: Coffee purchases 3x/week",
-    ],
-    policyChecks: [
-      "Merchant is verified",
-      "Amount typical for this merchant",
-      "Location matches usual routine",
-      "No suspicious activity",
-    ],
-    confidence: 97,
-  },
-  {
-    command: "Transfer $200 to Marcus for rent",
-    amount: "$200.00",
-    recipient: "Marcus Chen",
-    description: "Monthly rent contribution",
-    riskLevel: "medium" as RiskLevel,
-    steps: [
-      "Interpreting payment request…",
-      "Extracting amount: $200.00",
-      "Identifying recipient: Marcus Chen",
-      "Checking location safety: Home (safe zone)",
-      "Evaluating spending rules: Rent category detected",
-      "Risk score: Medium",
-      "Decision pending approval…",
-    ],
-    context: [
-      "Location: Home",
-      "Time: Morning",
-      "Recurring pattern: Monthly rent payment detected",
-    ],
-    policyChecks: [
-      "Recipient is landlord/roommate",
-      "Amount matches historical rent payments",
-      "Transaction timing aligns with pattern",
-      "Sufficient account balance",
-    ],
-    confidence: 88,
-  },
-];
 
 export default function App() {
   const [state, setState] = useState<AppState>("idle");
   const [messages, setMessages] = useState<string[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [logsOpen, setLogsOpen] = useState(false);
-  const [currentScenario, setCurrentScenario] = useState(0);
   const [delayedPayment, setDelayedPayment] = useState<DelayedPayment | null>(null);
+  const [pendingApproval, setPendingApproval] = useState<CommandResponse | null>(null);
+  const [scammerPanelOpen, setScammerPanelOpen] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
+  const [textInput, setTextInput] = useState("");
+  const textInputRef = useRef<HTMLInputElement>(null);
+  const [userState, setUserState] = useState<UserState | null>(null);
+  const [historyPanelOpen, setHistoryPanelOpen] = useState(false);
 
-  const startVoiceCommand = async () => {
-    if (state !== "idle" && state !== "completed") return;
+  // Fetch initial user state on mount
+  useEffect(() => {
+    getUserState().then(setUserState).catch(console.error);
+  }, []);
 
-    const scenario = mockScenarios[currentScenario % mockScenarios.length];
-    setMessages([]);
-    setState("listening");
+  // Real Voice Input Hook
+  const { isListening, transcript, startListening, stopListening } = useVoiceInput();
 
-    // Simulate voice input
-    await delay(1500);
+  // Effect to handle listening state changes
+  useEffect(() => {
+    if (isListening) {
+      if (state !== "listening") setState("listening");
+      if (transcript) setMessages([transcript]); // Show what is being heard
+    } else if (state === "listening") {
+      // Stopped listening, now processing
+      handleVoiceEnd();
+    }
+  }, [isListening, transcript]);
 
-    // Processing states with AI thinking
-    const stateProgression: Array<{ state: AppState; newMessages: string[] }> = [
-      { state: "processing", newMessages: [] },
-      { state: "understanding", newMessages: ["Interpreting payment request…"] },
-      { state: "understanding", newMessages: ["Interpreting payment request…", `Extracting amount: ${scenario.amount}`] },
-      { state: "understanding", newMessages: ["Interpreting payment request…", `Extracting amount: ${scenario.amount}`, `Identifying recipient: ${scenario.recipient}`] },
-      { state: "evaluating", newMessages: [...scenario.steps.slice(0, 4)] },
-      { state: "checking", newMessages: [...scenario.steps.slice(0, 5)] },
-      { state: "deciding", newMessages: [...scenario.steps.slice(0, 6)] },
-    ];
+  const startVoiceInput = () => {
+    if (state !== "idle" && state !== "completed" && state !== "error") return;
+    setMessages(["Listening..."]);
+    startListening();
+  };
 
-    for (const step of stateProgression) {
-      await delay(800);
-      setState(step.state);
-      if (step.newMessages.length > messages.length) {
-        setMessages(step.newMessages);
-      }
+  const handleTextSubmit = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const input = textInput.trim();
+    if (!input) return;
+    if (state !== "idle" && state !== "completed" && state !== "error") return;
+
+    setTextInput("");
+    setState("processing");
+    setMessages([`Processing: "${input}"`]);
+
+    await new Promise(r => setTimeout(r, 500));
+
+    try {
+      setState("understanding");
+      setMessages(["Interpreting command...", `Input: ${input}`]);
+
+      const result = await processCommand(input);
+      processBackendResult(result);
+    } catch (e) {
+      console.error(e);
+      setState("error");
+      setMessages(["Error connecting to server.", "Please try again."]);
+      setTimeout(() => setState("idle"), 3000);
+    }
+  };
+
+  const handleVoiceEnd = async () => {
+    if (!transcript.trim()) {
+      setState("idle");
+      setMessages([]);
+      return;
     }
 
-    // After deciding, check risk level
-    await delay(800);
-    
-    if (scenario.riskLevel === "low") {
-      // Auto-approve low risk
-      setMessages(scenario.steps);
-      setState("executing");
-      await delay(1500);
-      
-      const newLog: LogEntry = {
-        id: Date.now().toString(),
-        timestamp: new Date(),
-        command: scenario.command,
-        amount: scenario.amount,
-        recipient: scenario.recipient,
-        description: scenario.description,
-        confidence: scenario.confidence,
-        context: scenario.context,
-        policyChecks: scenario.policyChecks,
-        decision: "approved",
-        steps: scenario.steps,
-      };
+    setState("processing");
+    setMessages(["Processing audio...", `Heard: "${transcript}"`]);
 
-      setLogs([newLog, ...logs]);
-      setState("completed");
+    // Artificial delay for UX (to show processing state)
+    await new Promise(r => setTimeout(r, 800));
 
-      await delay(2000);
-      setState("idle");
-      setMessages([]);
-      setCurrentScenario(currentScenario + 1);
-    } else if (isBusy) {
-      // User is busy, delay the payment
-      setMessages([...scenario.steps.slice(0, -1), "User is busy, delaying payment for 30 seconds…"]);
-      
-      const delayedUntil = new Date();
-      delayedUntil.setSeconds(delayedUntil.getSeconds() + 30);
-      
-      setDelayedPayment({
-        id: Date.now().toString(),
-        amount: scenario.amount,
-        recipient: scenario.recipient,
-        delayedUntil,
-        scenario,
-      });
+    try {
+      setState("understanding");
+      setMessages(["Interpreting command...", `Input: ${transcript}`]);
 
-      setState("completed");
-      await delay(2000);
-      setState("idle");
-      setMessages([]);
-      setCurrentScenario(currentScenario + 1);
+      const result = await processCommand(transcript);
+
+      // Map backend result to UI state
+      processBackendResult(result);
+
+    } catch (e) {
+      console.error(e);
+      setState("error");
+      setMessages(["Error connecting to server.", "Please try again."]);
+      setTimeout(() => setState("idle"), 3000);
+    }
+  };
+
+  const processBackendResult = async (result: CommandResponse) => {
+    const intentType = result.intent?.intent_type;
+
+    // Handle Balance Inquiry - Text Only Response
+    if (intentType === 'BALANCE_INQUIRY' && result.execution_result) {
+      updateUserState(result);
+      setState("evaluating");
+      setMessages([
+        `Your current balance is ₹${result.execution_result.balance}.`,
+        `Today's spending: ₹${result.execution_result.daily_spend} of ₹${result.execution_result.daily_limit || 2000} daily limit.`
+      ]);
+
+      setTimeout(() => {
+        setState("completed");
+        setTimeout(() => setState("idle"), 2000);
+      }, 6000);
+      return;
+    }
+
+    // Handle Transaction History - Text Only Response
+    if (intentType === 'TRANSACTION_HISTORY' && result.execution_result?.history) {
+      updateUserState(result);
+      setState("evaluating");
+      const historyMsgs = result.execution_result.history.length === 0
+        ? ["No recent transactions found."]
+        : [
+          "Your recent transactions:",
+          // @ts-ignore
+          ...result.execution_result.history.slice(0, 4).map((txn: any) =>
+            `• ₹${txn.amount} to ${txn.merchant_vpa} (${new Date(txn.timestamp).toLocaleDateString()})`
+          )
+        ];
+      setMessages(historyMsgs);
+
+      setTimeout(() => {
+        setState("completed");
+        setTimeout(() => setState("idle"), 2000);
+      }, 9000);
+      return;
+    }
+
+    // ─── FULL 6-STAGE CAPS PIPELINE (For Payments) ─────────────────
+
+    const steps: string[] = [];
+
+    // Stage 1: Session Memory — Resolve references
+    setState("evaluating");
+    if (result.context_used && (result.context_used.merchant_vpa || result.context_used.amount)) {
+      steps.push("🧠 [Memory] Resolving references...");
+      if (result.context_used.merchant_vpa)
+        steps.push(`   → merchant: ${result.context_used.merchant_vpa}`);
+      if (result.context_used.amount)
+        steps.push(`   → amount: ₹${result.context_used.amount}`);
     } else {
-      // High/medium risk, need user approval
-      setMessages(scenario.steps);
-      setState("awaiting");
+      steps.push("🧠 [Memory] No references to resolve");
     }
+    setMessages([...steps]);
+    await new Promise(r => setTimeout(r, 600));
+
+    // Stage 2: LLM Intent Interpretation
+    steps.push(`🤖 [LLM] Intent: ${result.intent?.intent_type}`);
+    steps.push(`   Confidence: ${((result.intent?.confidence_score || 0) * 100).toFixed(0)}%`);
+    if (result.intent?.amount) steps.push(`   Amount: ₹${result.intent.amount}`);
+    if (result.intent?.merchant_vpa) steps.push(`   Merchant: ${result.intent.merchant_vpa}`);
+    setMessages([...steps]);
+    await new Promise(r => setTimeout(r, 600));
+
+    // Stage 3: Schema Validation (Trust Gate 1)
+    setState("checking");
+    if (result.status === 'error' && result.message?.includes("couldn't understand")) {
+      steps.push("🔒 [Trust Gate 1] Schema Validation ✗");
+      steps.push(`   ${result.message}`);
+      setMessages([...steps]);
+      setState("blocked");
+      completeTransaction(result, "declined");
+      return;
+    }
+    steps.push("🔒 [Trust Gate 1] Schema Validation ✓");
+    setMessages([...steps]);
+    await new Promise(r => setTimeout(r, 500));
+
+    // Stage 4: Context + Fraud Intelligence
+    steps.push("🌐 [Context] User & merchant data fetched");
+    if (result.user_state) {
+      steps.push(`   Balance: ₹${result.user_state.balance} | Spend: ₹${result.user_state.daily_spend}`);
+    }
+
+    // Fraud Intel display
+    if (result.fraud_intel) {
+      const fi = result.fraud_intel;
+      steps.push(`🛡️ [Fraud Intel] ${fi.badge_emoji} ${fi.badge} (${fi.total_reports} reports, ${fi.scam_rate}% scam)`);
+    }
+    setMessages([...steps]);
+    await new Promise(r => setTimeout(r, 600));
+
+    // Check for fraud-blocked status
+    if (result.status === 'blocked' && result.fraud_intel) {
+      setState("blocked");
+      steps.push(`🚫 BLOCKED: ${result.fraud_intel.badge_emoji} ${result.message}`);
+      setMessages([...steps]);
+      completeTransaction(result, "declined");
+      return;
+    }
+
+    // Stage 5: Policy Evaluation (Trust Gate 2)
+    setState("deciding");
+    steps.push(`🔐 [Trust Gate 2] Policy: ${result.policy_decision}`);
+    steps.push(`   Risk Score: ${result.risk_info?.score ?? 'N/A'}`);
+    if (result.risk_info?.violations && result.risk_info.violations.length > 0) {
+      steps.push(`   ⚠ ${result.risk_info.violations.length} violation(s)`);
+    } else {
+      steps.push("   No policy violations");
+    }
+    setMessages([...steps]);
+    await new Promise(r => setTimeout(r, 600));
+
+    // Stage 6: Execution / Decision Routing
+    if (result.policy_decision === "APPROVE") {
+      if (isBusy) {
+        // Delayed Payment Logic
+        handleBusyDelay(result);
+      } else {
+        setState("executing");
+        steps.push("💸 [Execution] Processing payment...");
+        setMessages([...steps]);
+        await new Promise(r => setTimeout(r, 800));
+
+        completeTransaction(result, "approved");
+      }
+    } else if (result.policy_decision === "DENY") {
+      setState("blocked");
+      steps.push(`🚫 [Denied] ${result.risk_info?.reason || result.message}`);
+      setMessages([...steps]);
+      completeTransaction(result, "declined");
+    } else {
+      // COOLDOWN or ESCALATE -> Ask user
+      setState("awaiting");
+      setPendingApproval(result); // Store pending result for approval
+      steps.push("⏳ [Escalated] Manual approval required");
+      setMessages([...steps]);
+    }
+  };
+
+  // Helper: update user state from any backend response
+  const updateUserState = (result: CommandResponse) => {
+    if (result.user_state) {
+      setUserState(prev => ({
+        ...prev,
+        balance: result.user_state!.balance,
+        daily_spend: result.user_state!.daily_spend,
+        daily_limit: result.user_state!.daily_limit,
+        trust_score: result.user_state!.trust_score,
+        recent_transactions: result.user_state!.recent_transactions || prev?.recent_transactions || [],
+      }));
+    }
+  };
+
+  const completeTransaction = (result: CommandResponse, decision: "approved" | "declined") => {
+    // Update persisted user state
+    updateUserState(result);
+    // Create Log Entry
+    const newLog: LogEntry = {
+      id: Date.now().toString(),
+      timestamp: new Date(),
+      command: result.intent?.raw_input || "",
+      amount: result.intent?.amount?.toString() || "0",
+      recipient: result.intent?.merchant_vpa || "Unknown",
+      description: result.intent?.intent_type || "Transaction",
+      confidence: Number((result.intent?.confidence_score || 0) * 100),
+      context: [`Risk: ${result.risk_info?.score}`, `Conf: ${((result.intent?.confidence_score || 0) * 100).toFixed(0)}%`],
+      policyChecks: result.risk_info?.violations || [],
+      decision: decision,
+      steps: [`Result: ${result.status}`, `Ref: ${result.execution_result?.reference_number || 'N/A'}`],
+    };
+
+    setLogs(prev => [newLog, ...prev]);
+
+    if (decision === "approved") {
+      setState("completed");
+    }
+
+    setTimeout(() => {
+      setState("idle");
+      setMessages([]);
+    }, 3000);
+  };
+
+  const handleBusyDelay = (result: CommandResponse) => {
+    const delayedUntil = new Date();
+    delayedUntil.setSeconds(delayedUntil.getSeconds() + 30);
+
+    setDelayedPayment({
+      id: Date.now().toString(),
+      amount: result.intent?.amount?.toString() || "0",
+      recipient: result.intent?.merchant_vpa || "Unknown",
+      delayedUntil,
+      intent: result.intent,
+    });
+
+    setState("completed");
+    setMessages(["User busy. Payment delayed 30s."]);
+    setTimeout(() => {
+      setState("idle");
+      setMessages([]);
+    }, 2000);
   };
 
   const handleApprove = async () => {
+    if (!pendingApproval || !pendingApproval.intent) {
+      setState("idle");
+      return;
+    }
+
     setState("executing");
-    setMessages([...messages, "Approved by user", "Executing payment…", "Payment successful"]);
+    setMessages(prev => [...prev, "👤 User confirmed. Executing..."]);
 
-    await delay(2000);
+    try {
+      // Call backend to execute the approved transaction
+      const rawInput = pendingApproval.intent.raw_input || "";
+      const mpva = pendingApproval.intent.merchant_vpa || "";
+      const amount = pendingApproval.intent.amount || 0;
 
-    const scenario = mockScenarios[currentScenario % mockScenarios.length];
-    const newLog: LogEntry = {
-      id: Date.now().toString(),
-      timestamp: new Date(),
-      command: scenario.command,
-      amount: scenario.amount,
-      recipient: scenario.recipient,
-      description: scenario.description,
-      confidence: scenario.confidence,
-      context: scenario.context,
-      policyChecks: scenario.policyChecks,
-      decision: "approved",
-      steps: scenario.steps,
-    };
+      const result = await executeApproved(mpva, amount, rawInput);
 
-    setLogs([newLog, ...logs]);
-    setState("completed");
-
-    await delay(2000);
-    setState("idle");
-    setMessages([]);
-    setCurrentScenario(currentScenario + 1);
+      // Complete transaction (logs, state update, UI completion)
+      completeTransaction(result, "approved");
+    } catch (e) {
+      console.error("Execution failed", e);
+      setState("error");
+      setMessages(["Execution failed."]);
+      setTimeout(() => setState("idle"), 2000);
+    } finally {
+      setPendingApproval(null);
+    }
   };
 
-  const handleDecline = async () => {
+  const handleDecline = () => {
     setState("blocked");
-    setMessages([...messages, "Declined by user", "Payment cancelled"]);
-
-    await delay(2000);
-
-    const scenario = mockScenarios[currentScenario % mockScenarios.length];
-    const newLog: LogEntry = {
-      id: Date.now().toString(),
-      timestamp: new Date(),
-      command: scenario.command,
-      amount: scenario.amount,
-      recipient: scenario.recipient,
-      description: scenario.description,
-      confidence: scenario.confidence,
-      context: scenario.context,
-      policyChecks: scenario.policyChecks,
-      decision: "declined",
-      steps: scenario.steps,
-    };
-
-    setLogs([newLog, ...logs]);
-    setState("completed");
-
-    await delay(2000);
-    setState("idle");
-    setMessages([]);
-    setCurrentScenario(currentScenario + 1);
+    setPendingApproval(null);
+    setTimeout(() => setState("idle"), 2000);
   };
 
-  const handleWait = async () => {
-    // Delay this payment
-    const scenario = mockScenarios[currentScenario % mockScenarios.length];
-    
-    const delayedUntil = new Date();
-    delayedUntil.setSeconds(delayedUntil.getSeconds() + 30);
-    
-    setDelayedPayment({
-      id: Date.now().toString(),
-      amount: scenario.amount,
-      recipient: scenario.recipient,
-      delayedUntil,
-      scenario,
-    });
-
+  const handleWait = () => {
+    // Similar to busy delay
     setState("idle");
-    setMessages([]);
-    setCurrentScenario(currentScenario + 1);
   };
 
   const handleDelayedTimeUp = async () => {
-    if (!delayedPayment) return;
+    // 1. Validate we have a payment intent
+    if (!delayedPayment || !delayedPayment.intent) {
+      setDelayedPayment(null);
+      return;
+    }
 
-    setState("executing");
-    setMessages(["Executing delayed payment…", "Payment successful"]);
+    // 2. Capture data needed for execution before clearing state
+    const rawInput = delayedPayment.intent.raw_input || "";
+    const mpva = delayedPayment.intent.merchant_vpa || "";
+    const amount = delayedPayment.intent.amount || 0;
 
-    await delay(2000);
-
-    const scenario = delayedPayment.scenario;
-    const newLog: LogEntry = {
-      id: Date.now().toString(),
-      timestamp: new Date(),
-      command: scenario.command,
-      amount: scenario.amount,
-      recipient: scenario.recipient,
-      description: scenario.description,
-      confidence: scenario.confidence,
-      context: scenario.context,
-      policyChecks: scenario.policyChecks,
-      decision: "approved",
-      steps: scenario.steps,
-    };
-
-    setLogs([newLog, ...logs]);
-    setState("completed");
-
-    await delay(2000);
-    setState("idle");
-    setMessages([]);
+    // 3. Clear timer immediately to prevent re-entry / race conditions
+    // This unmounts the DelayedPaymentTimer component
     setDelayedPayment(null);
+
+    // 4. Update UI to executing state
+    setState("executing");
+    setMessages(["Executing delayed payment..."]);
+
+    try {
+      // 5. Execute the already-approved payment
+      const result = await executeApproved(mpva, amount, rawInput);
+
+      // 6. Log it and update state to completed
+      completeTransaction(result, "approved");
+    } catch (e) {
+      console.error("Delayed execution failed", e);
+      setState("error");
+      setMessages(["Delayed execution failed."]);
+      setTimeout(() => setState("idle"), 2000);
+    }
   };
 
   const handleCancelDelayed = () => {
-    if (!delayedPayment) return;
-
-    const scenario = delayedPayment.scenario;
-    const newLog: LogEntry = {
-      id: Date.now().toString(),
-      timestamp: new Date(),
-      command: scenario.command,
-      amount: scenario.amount,
-      recipient: scenario.recipient,
-      description: scenario.description,
-      confidence: scenario.confidence,
-      context: scenario.context,
-      policyChecks: scenario.policyChecks,
-      decision: "declined",
-      steps: scenario.steps,
-    };
-
-    setLogs([newLog, ...logs]);
     setDelayedPayment(null);
   };
 
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-black text-white relative overflow-hidden">
-      {/* Ambient background */}
+      {/* Backgrounds */}
       <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-purple-900/20 via-transparent to-transparent pointer-events-none" />
       <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_bottom_right,_var(--tw-gradient-stops))] from-blue-900/10 via-transparent to-transparent pointer-events-none" />
 
@@ -393,7 +432,19 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* Top center - Busy Mode Toggle */}
+      {/* Scammer Panel Toggle */}
+      <motion.button
+        onClick={() => setScammerPanelOpen(true)}
+        className="absolute top-6 left-6 z-30 w-12 h-12 rounded-full bg-white/5 backdrop-blur-xl border border-white/10 flex items-center justify-center hover:bg-red-500/10 hover:border-red-500/20 transition-all group"
+        whileHover={{ scale: 1.05 }}
+        whileTap={{ scale: 0.95 }}
+        initial={{ opacity: 0, x: -20 }}
+        animate={{ opacity: 1, x: 0 }}
+      >
+        <Shield className="w-5 h-5 text-white/60 group-hover:text-red-400 transition-colors" />
+      </motion.button>
+
+      {/* Busy Mode Toggle */}
       <motion.div
         className="absolute top-6 left-1/2 -translate-x-1/2 z-30"
         initial={{ opacity: 0, y: -20 }}
@@ -401,11 +452,10 @@ export default function App() {
       >
         <button
           onClick={() => setIsBusy(!isBusy)}
-          className={`px-4 py-2 rounded-full backdrop-blur-xl border transition-all flex items-center gap-2 ${
-            isBusy
-              ? "bg-yellow-500/20 border-yellow-500/30 text-yellow-300"
-              : "bg-white/5 border-white/10 text-white/60 hover:bg-white/10"
-          }`}
+          className={`px-4 py-2 rounded-full backdrop-blur-xl border transition-all flex items-center gap-2 ${isBusy
+            ? "bg-yellow-500/20 border-yellow-500/30 text-yellow-300"
+            : "bg-white/5 border-white/10 text-white/60 hover:bg-white/10"
+            }`}
         >
           {isBusy ? (
             <>
@@ -421,7 +471,35 @@ export default function App() {
         </button>
       </motion.div>
 
-      {/* Top right logs button */}
+      {/* Balance Bar — tap to open history */}
+      {userState && (
+        <motion.div
+          className="absolute top-20 left-1/2 -translate-x-1/2 z-30 cursor-pointer"
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.2 }}
+          onClick={() => setHistoryPanelOpen(true)}
+        >
+          <div className="flex items-center gap-4 px-5 py-2.5 rounded-2xl bg-white/5 backdrop-blur-xl border border-white/10 hover:bg-white/8 transition-all">
+            <div className="flex items-center gap-2">
+              <Wallet className="w-4 h-4 text-emerald-400" />
+              <span className="text-sm font-semibold text-emerald-300">₹{userState.balance.toLocaleString()}</span>
+            </div>
+            <div className="w-px h-4 bg-white/10" />
+            <div className="text-xs text-white/40">
+              <span>Spent: ₹{userState.daily_spend}</span>
+              <span className="mx-1">/</span>
+              <span>₹{userState.daily_limit}</span>
+            </div>
+            <div className="w-px h-4 bg-white/10" />
+            <div className="text-xs text-white/40">
+              Trust: {(userState.trust_score * 100).toFixed(0)}%
+            </div>
+          </div>
+        </motion.div>
+      )}
+
+      {/* Logs Toggle */}
       <motion.button
         onClick={() => setLogsOpen(true)}
         className="absolute top-6 right-6 z-30 w-12 h-12 rounded-full bg-white/5 backdrop-blur-xl border border-white/10 flex items-center justify-center hover:bg-white/10 transition-all group"
@@ -440,22 +518,22 @@ export default function App() {
         )}
       </motion.button>
 
-      {/* Main content */}
+      {/* Main Interface */}
       <div className="relative z-10 min-h-screen flex flex-col items-center justify-center px-6 py-12 gap-12">
         {/* Voice Orb */}
         <div
-          onClick={state === "idle" || state === "completed" ? startVoiceCommand : undefined}
-          className={state === "idle" || state === "completed" ? "cursor-pointer" : ""}
+          onClick={state === "idle" || state === "completed" || state === "error" ? startVoiceInput : undefined}
+          className={state === "idle" || state === "completed" || state === "error" ? "cursor-pointer" : ""}
         >
           <VoiceOrb state={state} />
         </div>
 
-        {/* AI Process Cloud */}
+        {/* AI Cloud Messages */}
         <div className="w-full max-w-md">
           <AIProcessCloud messages={messages} isStreaming={state !== "idle" && state !== "completed"} />
         </div>
 
-        {/* Decision Buttons */}
+        {/* Buttons */}
         <DecisionButtons
           show={state === "awaiting"}
           onApprove={handleApprove}
@@ -463,33 +541,60 @@ export default function App() {
           onDecline={handleDecline}
         />
 
-        {/* Hint text for idle state */}
-        {state === "idle" && messages.length === 0 && (
-          <motion.div
-            className="absolute bottom-12 text-center space-y-3"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ delay: 0.5 }}
+        {/* Text Input Bar */}
+        <motion.div
+          className="fixed bottom-0 left-0 right-0 z-40 p-4 bg-gradient-to-t from-gray-950 via-gray-950/95 to-transparent"
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.3 }}
+        >
+          <form
+            onSubmit={handleTextSubmit}
+            className="max-w-lg mx-auto flex items-center gap-3"
           >
-            <div className="flex items-center justify-center gap-2 text-white/30">
-              <Mic className="w-4 h-4" />
-              <p className="text-sm font-light">Tap the orb to speak</p>
+            <div className="flex-1 relative">
+              <MessageSquare className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-white/30" />
+              <input
+                ref={textInputRef}
+                type="text"
+                value={textInput}
+                onChange={(e) => setTextInput(e.target.value)}
+                placeholder="Type a command... e.g. 'pay 500 to shop@upi'"
+                disabled={state !== "idle" && state !== "completed" && state !== "error"}
+                className="w-full pl-10 pr-4 py-3 bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-purple-500/40 focus:bg-white/8 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+              />
             </div>
-            <div className="space-y-1">
-              <p className="text-xs text-white/20">Low risk: Auto-approved</p>
-              <p className="text-xs text-white/20">High risk: Approval required</p>
-              <p className="text-xs text-white/20">Busy mode: Delayed 30 seconds</p>
+            <motion.button
+              type="submit"
+              disabled={(state !== "idle" && state !== "completed" && state !== "error") || !textInput.trim()}
+              className="w-11 h-11 rounded-xl bg-purple-500/20 border border-purple-500/30 flex items-center justify-center text-purple-300 hover:bg-purple-500/30 hover:text-purple-200 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+            >
+              <Send className="w-4 h-4" />
+            </motion.button>
+          </form>
+          <div className="max-w-lg mx-auto mt-2 flex items-center justify-center gap-4">
+            <div className="flex items-center gap-1.5 text-white/20">
+              <Mic className="w-3 h-3" />
+              <span className="text-[10px]">Tap orb to speak</span>
             </div>
-          </motion.div>
-        )}
+            <span className="text-white/10 text-[10px]">•</span>
+            <span className="text-[10px] text-white/20">Real Transactions Enabled</span>
+          </div>
+        </motion.div>
       </div>
 
-      {/* Logs Panel */}
       <LogsPanel logs={logs} isOpen={logsOpen} onClose={() => setLogsOpen(false)} />
+      <ScammerPanel isOpen={scammerPanelOpen} onClose={() => setScammerPanelOpen(false)} />
+      <TransactionHistoryPanel
+        isOpen={historyPanelOpen}
+        onClose={() => setHistoryPanelOpen(false)}
+        transactions={userState?.recent_transactions || []}
+        balance={userState?.balance || 0}
+        dailySpend={userState?.daily_spend || 0}
+        dailyLimit={userState?.daily_limit || 2000}
+      />
     </div>
   );
-}
-
-function delay(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
