@@ -1,5 +1,5 @@
 # CAPS: Context-Aware Agentic Payment System
-
+#DEVSOC'26 TRACK WINNER (DIGITAL ECONOMY)
 <div align="center">
 
 **A deterministic payment kernel designed for a world where AI reasons but never decides alone**
